@@ -1,0 +1,11 @@
+/home/kfk/Documents/tcp-rust/target/debug/deps/parking_lot_core-8f60541621d1bbef.rmeta: /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/lib.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/parking_lot.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/spinwait.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/mod.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/util.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/word_lock.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/linux.rs
+
+/home/kfk/Documents/tcp-rust/target/debug/deps/parking_lot_core-8f60541621d1bbef.d: /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/lib.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/parking_lot.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/spinwait.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/mod.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/util.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/word_lock.rs /home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/linux.rs
+
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/lib.rs:
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/parking_lot.rs:
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/spinwait.rs:
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/mod.rs:
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/util.rs:
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/word_lock.rs:
+/home/kfk/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/linux.rs:
