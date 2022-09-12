@@ -1,21 +1,31 @@
-use std::io::Read;
-use std::{io, thread};
+use std::io::{Read, Write};
 use std::prelude::*;
-
+use std::{io, thread};
 
 fn main() -> io::Result<()> {
     
     let mut i = tcpRust::Interface::new()?;
     let mut l = i.bind(9000)?;
     let jh = thread::spawn(move || {
-        while let Ok(mut _stream) = l.accept() {
+        while let Ok(mut stream) = l.accept() {
             eprintln!("got connection on 9000!!");
+            // stream.write(b"hello").unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+           loop {
+                let mut buf = [0; 512];
 
-            let n = _stream.read(&mut [0]).unwrap();
-            eprintln!("read data");
-            assert_eq!(n, 0);
+                let n = stream.read(&mut buf[..]).unwrap();
+                eprintln!("read {}b of data", n);
+
+                if n == 0 {
+                    eprintln!("no more data");
+                    break;
+                }
+                else {
+                    eprintln!("got {:?}", std::str::from_utf8(&buf[..n]).unwrap());
+                }
+            }
         }
-
     });
 
     jh.join().unwrap();
