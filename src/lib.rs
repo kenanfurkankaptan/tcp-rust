@@ -73,7 +73,7 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
             nix::poll::EventFlags::POLLIN,
         )];
         // TODO: timers wake up every milisecond, this could be implemented in a better way
-        let n = nix::poll::poll(&mut pfd[..], 1).map_err(|e| e.as_errno().unwrap())?;
+        let n = nix::poll::poll(&mut pfd[..], 10).map_err(|e| e.as_errno().unwrap())?;
         assert_ne!(n, -1);
         if n == 0 {
             // TODO: timed out -- do something with timers
@@ -309,10 +309,14 @@ impl Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut cm = self.h.manager.lock().unwrap();
         let c = cm.connections.get_mut(&self.quad).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::ConnectionAborted, "stream was terminated unexpectedly")
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "stream was terminated unexpectedly",
+            )
         })?;
 
         if c.unacked.len() >= SENDQUEUE_SIZE {
+            // TODO: block
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "too many bytes buffered",
@@ -321,8 +325,6 @@ impl Write for TcpStream {
 
         let nwrite = std::cmp::min(buf.len(), SENDQUEUE_SIZE - c.unacked.len());
         c.unacked.extend(buf[..nwrite].iter());
-
-        // TODO: wake up writer
 
         Ok(nwrite)
     }
@@ -336,6 +338,7 @@ impl Write for TcpStream {
         if c.unacked.is_empty() {
             Ok(())
         } else {
+            // TODO: block
             Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "too many bytes buffered",
@@ -351,7 +354,6 @@ impl TcpStream {
             io::Error::new(io::ErrorKind::ConnectionAborted, "stream was terminated")
         })?;
 
-        c.close();
-        Ok(())
+        c.close()
     }
 }
