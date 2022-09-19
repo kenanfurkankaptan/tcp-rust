@@ -11,23 +11,21 @@ bitflags! {
 }
 
 #[derive(Debug)]
-pub enum State {
+enum State {
     // Listen,
     SynRcvd,
     Estab,
     FinWait1,
     FinWait2,
     TimeWait,
-    Closing,
+    // Closing,
 }
 
 impl State {
     fn is_synchronized(&self) -> bool {
         match *self {
             State::SynRcvd => false,
-            State::Estab | State::FinWait1 | State::FinWait2 | State::Closing | State::TimeWait => {
-                true
-            }
+            State::Estab | State::FinWait1 | State::FinWait2 | State::TimeWait => true,
         }
     }
 }
@@ -44,7 +42,7 @@ pub struct Connection {
     pub(crate) unacked: VecDeque<u8>,
 
     pub(crate) closed: bool,
-    pub(crate) closed_at: Option<u32>,
+    closed_at: Option<u32>,
 }
 
 struct Timers {
@@ -178,10 +176,13 @@ impl Connection {
                 iss,
                 wnd,
             ),
+
             incoming: Default::default(),
             unacked: Default::default(),
+
             closed: false,
             closed_at: None,
+
             timers: Timers {
                 send_times: Default::default(),
                 srtt: time::Duration::from_secs(1 * 60).as_secs_f64(),
@@ -195,12 +196,7 @@ impl Connection {
         Ok(Some(c))
     }
 
-    fn write(
-        &mut self,
-        nic: &mut tun_tap::Iface,
-        seq: u32,
-        mut limit: usize,
-    ) -> io::Result<(usize)> {
+    fn write(&mut self, nic: &mut tun_tap::Iface, seq: u32, mut limit: usize) -> io::Result<usize> {
         let mut buf = [0u8; 1500];
         self.tcp.sequence_number = seq;
         self.tcp.acknowledgment_number = self.recv.nxt;
@@ -233,30 +229,14 @@ impl Connection {
         //     self.unacked.as_slices()
         // );
 
-        //-------------------------------------
-        if limit > 0 {
-            self.tcp.psh = true;
-        } else {
-            self.tcp.psh = false;
-        }
-        //-------------------------------------
-
         let (mut h, mut t) = self.unacked.as_slices();
         if h.len() >= offset {
-            h = &mut &h[offset..];
+            h = &h[offset..];
         } else {
             let skipped = h.len();
             h = &[];
             t = &t[(offset - skipped)..];
         }
-
-        //-------------------------------------
-        if self.ip.identification == 0 {
-            self.ip.identification = 45678;
-        } else {
-            self.ip.identification += 1;
-        }
-        //-------------------------------------
 
         let mut max_data = std::cmp::min(limit, h.len() + t.len());
         let size = std::cmp::min(
@@ -299,7 +279,7 @@ impl Connection {
         // checksum calculation
         self.tcp.checksum = self
             .tcp
-            .calc_checksum_ipv4(&self.ip, &[])
+            .calc_checksum_ipv4(&self.ip, &buf[tcp_header_ends_at..payload_ends_at])
             .expect("failed to compute checksum");
 
         let mut tcp_header_buf = &mut buf[ip_header_ends_at..tcp_header_ends_at];
@@ -323,7 +303,7 @@ impl Connection {
         Ok(payload_bytes)
     }
 
-    pub fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
+    fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
         self.tcp.rst = true;
         // TODO: fix sequence numbers here
         // If the incoming segment has an ACK field, the reset takes its
@@ -346,7 +326,7 @@ impl Connection {
         Ok(())
     }
 
-    pub(crate) fn on_tick<'a>(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
+    pub(crate) fn on_tick(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
         if let State::FinWait2 | State::TimeWait = self.state {
             // we have shutdown our write side and the other side acked, no need to (re)transmit anything
             return Ok(());
@@ -375,7 +355,7 @@ impl Connection {
         if should_retransmit {
             // we should retransmit!
             let resend = std::cmp::min(self.unacked.len() as u32, self.send.wnd as u32);
-            if resend == 0 && resend < self.send.wnd as u32 && self.closed {
+            if resend < self.send.wnd as u32 && self.closed {
                 // can we include the FIN?
                 self.tcp.fin = true;
                 self.closed_at = Some(self.send.una.wrapping_add(self.unacked.len() as u32));
@@ -398,7 +378,7 @@ impl Connection {
                 self.closed_at = Some(self.send.una.wrapping_add(self.unacked.len() as u32));
             }
 
-            self.write(nic, self.send.una, send as usize)?;
+            self.write(nic, self.send.nxt, send as usize)?;
         }
 
         // if FIN, enter FIN-WAIT-1
@@ -444,7 +424,7 @@ impl Connection {
             }
         } else {
             if self.recv.wnd == 0 {
-                return Ok(self.availability());
+                false
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
                 && !is_between_wrapped(
                     self.recv.nxt.wrapping_sub(1),
@@ -459,6 +439,7 @@ impl Connection {
         };
 
         if !okay {
+            eprintln!("NOT OKAY");
             self.write(nic, self.send.nxt, 0)?;
             return Ok(self.availability());
         }
@@ -542,9 +523,11 @@ impl Connection {
         }
 
         if let State::FinWait1 = self.state {
-            if self.send.una == self.send.iss + 2 {
-                // our fin has been ACKed
-                self.state = State::FinWait2;
+            if let Some(closed_at) = self.closed_at {
+                if self.send.una == closed_at.wrapping_add(1) {
+                    // our FIN has been ACKed!
+                    self.state = State::FinWait2;
+                }
             }
         }
 
@@ -578,6 +561,7 @@ impl Connection {
             match self.state {
                 State::FinWait2 => {
                     // we are done with connection
+                    self.recv.nxt = self.recv.nxt.wrapping_add(1);
                     self.write(nic, self.send.nxt, 0)?;
                     self.state = State::TimeWait;
                 }
@@ -614,7 +598,7 @@ fn wrapping_lt(lhs: u32, rhs: u32) -> bool {
     // insured that new data is never mistakenly considered old and
     // vice-versa, the left edge of the sender's windpw has to be at
     // most 2**31 away from the right edge of the receiver's window
-    lhs.wrapping_sub(rhs) > 2 ^ 31
+    lhs.wrapping_sub(rhs) > (1 << 31)
 }
 
 fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {

@@ -8,8 +8,6 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use tcp::Available;
-
 mod tcp;
 
 const SENDQUEUE_SIZE: usize = 1024;
@@ -38,7 +36,6 @@ impl Drop for Interface {
         self.ih.as_mut().unwrap().manager.lock().unwrap().terminate = true;
 
         drop(self.ih.take());
-
         self.jh
             .take()
             .expect("interface dropped more than once")
@@ -46,12 +43,6 @@ impl Drop for Interface {
             .unwrap()
             .unwrap();
     }
-}
-
-#[derive(Default)]
-struct Pending {
-    quads: VecDeque<Quad>,
-    var: Condvar,
 }
 
 #[derive(Default)]
@@ -80,7 +71,7 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
             let mut cmg = ih.manager.lock().unwrap();
             for connection in cmg.connections.values_mut() {
                 // TODO: dont die on errors
-                connection.on_tick(&mut nic);
+                connection.on_tick(&mut nic)?;
             }
 
             continue;
@@ -108,15 +99,15 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                 let ip_dst = ip_h.destination_addr();
                 let ip_proto = ip_h.protocol();
                 if (ip_proto != 0x06) {
+                    eprintln!("BAD PROTOCOL");
                     // not tcp
                     continue;
                 }
 
-                let ip_hdr_sz = ip_h.slice().len();
-                match etherparse::TcpHeaderSlice::from_slice(&buf[ip_h.slice().len()..]) {
+                match etherparse::TcpHeaderSlice::from_slice(&buf[..nbytes]) {
                     Ok(tcp_h) => {
                         use std::collections::hash_map::Entry;
-                        let datai = ip_hdr_sz + tcp_h.slice().len();
+                        let datai = ip_h.slice().len() + tcp_h.slice().len();
                         let mut cmg = ih.manager.lock().unwrap();
                         let cm = &mut *cmg;
                         let q = Quad {
@@ -143,8 +134,10 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                                 }
                             }
                             Entry::Vacant(e) => {
+                                eprintln!("got packet for unknown quad {:?}", q);
                                 if let Some(pending) = cm.pending.get_mut(&tcp_h.destination_port())
                                 {
+                                    eprintln!("listening, so accepting");
                                     if let Some(c) = tcp::Connection::accept(
                                         &mut nic,
                                         ip_h,
@@ -153,11 +146,8 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                                     )? {
                                         e.insert(c);
                                         pending.push_back(q);
-                                        drop(cm);
                                         drop(cmg);
                                         ih.pending_var.notify_all();
-
-                                        // TODO: wake up pending accept();
                                     }
                                 }
                             }
@@ -231,7 +221,7 @@ impl Drop for TcpListener {
 
         for quad in pending {
             // TODO: terminate cm.connections[quad]
-            unimplemented!()
+            unimplemented!();
         }
     }
 }
@@ -264,7 +254,7 @@ pub struct TcpStream {
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        let mut cm = self.h.manager.lock().unwrap();
+        let cm = self.h.manager.lock().unwrap();
         // TODO: send FIN on cm.connections[quad]
         // TODO: _eventually_ remove self.quad from cm.connections
     }
@@ -292,7 +282,7 @@ impl Read for TcpStream {
                 let hread = std::cmp::min(buf.len(), head.len());
                 buf[..hread].copy_from_slice(&head[..hread]);
                 nread += hread;
-                let mut tread = std::cmp::min(buf.len() - nread, tail.len());
+                let tread = std::cmp::min(buf.len() - nread, tail.len());
                 buf[hread..(hread + tread)].copy_from_slice(&tail[..tread]);
                 nread += tread;
                 drop(c.incoming.drain(..nread));
