@@ -46,7 +46,7 @@ impl Drop for Interface {
 }
 
 #[derive(Default)]
-pub struct ConnectionManager {
+struct ConnectionManager {
     terminate: bool,
     connections: HashMap<Quad, tcp::Connection>,
     pending: HashMap<u16, VecDeque<Quad>>,
@@ -97,14 +97,13 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
             Ok(ip_h) => {
                 let ip_src = ip_h.source_addr();
                 let ip_dst = ip_h.destination_addr();
-                let ip_proto = ip_h.protocol();
-                if (ip_proto != 0x06) {
+                if (ip_h.protocol() != 0x06) {
                     eprintln!("BAD PROTOCOL");
                     // not tcp
                     continue;
                 }
 
-                match etherparse::TcpHeaderSlice::from_slice(&buf[..nbytes]) {
+                match etherparse::TcpHeaderSlice::from_slice(&buf[ip_h.slice().len()..nbytes]) {
                     Ok(tcp_h) => {
                         use std::collections::hash_map::Entry;
                         let datai = ip_h.slice().len() + tcp_h.slice().len();

@@ -137,7 +137,7 @@ impl Connection {
         tcp_h: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<Option<Self>> {
-        let mut buf = [0u8; 1500];
+        let buf = [0u8; 1500];
         if !tcp_h.syn() {
             // only expected SYN packet
             return Ok(None);
