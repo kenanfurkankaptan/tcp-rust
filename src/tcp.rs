@@ -12,34 +12,38 @@ bitflags! {
 
 #[derive(Debug)]
 enum State {
-    // Listen,
+    Listen,
+    SynSent,
     SynRcvd,
     Estab,
     FinWait1,
     FinWait2,
+    CloseWait,
+    LastAck,
+    Closing,
     TimeWait,
-    // Closing,
+    Closed,
 }
 
-impl State {
-    fn is_synchronized(&self) -> bool {
-        match *self {
-            State::SynRcvd => false,
-            State::Estab | State::FinWait1 | State::FinWait2 | State::TimeWait => true,
-        }
-    }
-}
+// impl State {
+//     fn is_synchronized(&self) -> bool {
+//         match *self {
+//             State::SynRcvd => false,
+//             State::Estab | State::FinWait1 | State::FinWait2 | State::TimeWait => true,
+//         }
+//     }
+// }
 
 pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: RecvSequenceSpace,
-    ip: etherparse::Ipv4Header,
+    pub ip: etherparse::Ipv4Header,
     tcp: etherparse::TcpHeader,
     timers: Timers,
 
     pub(crate) incoming: VecDeque<u8>, // pub(crate) == protected keyword
-    pub(crate) unacked: VecDeque<u8>,
+    pub(crate) unacked: VecDeque<u8>,  // unacked contains both sent and unsent data
 
     pub(crate) closed: bool,
     closed_at: Option<u32>,
@@ -52,8 +56,26 @@ struct Timers {
 
 impl Connection {
     pub(crate) fn is_rcv_closed(&self) -> bool {
-        if let State::TimeWait = self.state {
-            // TODO: any state after rcvd FIN, so also  CLOSE-WAIT, LAST-ACK, CLOSED, CLOSING
+        if let State::TimeWait
+        | State::CloseWait
+        | State::LastAck
+        | State::Closed
+        | State::Closing = self.state
+        {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_snd_closed(&self) -> bool {
+        if let State::FinWait1
+        | State::FinWait2
+        | State::Closing
+        | State::TimeWait
+        | State::LastAck
+        | State::Closed = self.state
+        {
             true
         } else {
             false
@@ -67,21 +89,25 @@ impl Connection {
             a |= Available::READ;
         }
 
-        // TODO: set Available::write
-        // TODO: take into account self.state
+        if self.is_snd_closed() || !self.unacked.is_empty() {
+            a |= Available::WRITE;
+        }
 
+        // done -> test it
+        // // TODO: set Available::write
+        // // TODO: take into account self.state
         a
     }
 }
 
-/// TODO fix snd.una
 /// State of the Send Sequence Space (RFC 793 S3.2 Figure4)
 ///
 /// ```
 ///
 ///      1         2          3          4
 /// ----------|----------|----------|----------
-///   SND.UNA    SND.NXT    SND.UNA    SND.WND
+///        SND.UNA    SND.NXT    SND.UNA    
+///                             + SND.WND
 ///
 /// 1 - old sequence numbers which have been acknowledged
 /// 2 - sequence numbers of unacknowledged data
@@ -112,7 +138,8 @@ pub struct SendSequenceSpace {
 
 ///      1          2          3
 /// ----------|----------|----------
-///  RCV.NXT    RCV.NXT    RCV.WND
+///        RCV.NXT    RCV.NXT
+///                  + RCV.WND
 ///
 /// 1 - old sequence numbers which have been acknowledged
 /// 2 - sequence numbers allowed for new reception
@@ -192,6 +219,71 @@ impl Connection {
         // needs to start establishing connection
         c.tcp.syn = true;
         c.tcp.ack = true;
+        c.write(nic, c.send.nxt, 0)?;
+        Ok(Some(c))
+    }
+
+    pub fn connect<'a>(
+        nic: &mut tun_tap::Iface,
+        ip_h: etherparse::Ipv4HeaderSlice<'a>,
+        tcp_h: etherparse::TcpHeaderSlice<'a>,
+        data: &'a [u8],
+    ) -> io::Result<Option<Self>> {
+        let buf = [0u8; 1500];
+        if !tcp_h.syn() {
+            // expected SYN packet
+            return Ok(None);
+        }
+
+        let iss = 0;
+        let wnd = 1024;
+        let mut c = Connection {
+            state: State::SynRcvd,
+            send: SendSequenceSpace {
+                iss: iss,
+                una: iss,
+                nxt: iss,
+                wnd: wnd,
+                up: false,
+
+                wl1: 0,
+                wl2: 0,
+            },
+            recv: RecvSequenceSpace {
+                irs: tcp_h.sequence_number(),
+                nxt: tcp_h.sequence_number() + 1,
+                wnd: tcp_h.window_size(),
+                up: false,
+            },
+            ip: etherparse::Ipv4Header::new(
+                0,
+                64,
+                etherparse::IpTrafficClass::Tcp,
+                ip_h.destination().try_into().unwrap(),
+                ip_h.source().try_into().unwrap(),
+            ),
+            tcp: etherparse::TcpHeader::new(
+                tcp_h.destination_port(),
+                tcp_h.source_port(),
+                iss,
+                wnd,
+            ),
+
+            incoming: Default::default(),
+            unacked: Default::default(),
+
+            closed: false,
+            closed_at: None,
+
+            timers: Timers {
+                send_times: Default::default(),
+                srtt: time::Duration::from_secs(1 * 60).as_secs_f64(),
+            },
+        };
+
+        // needs to start establishing connection -- send syn on
+        c.tcp.syn = true;
+        c.tcp.ack = false;
         c.write(nic, c.send.nxt, 0)?;
         Ok(Some(c))
     }
@@ -327,7 +419,8 @@ impl Connection {
     }
 
     pub(crate) fn on_tick(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
-        if let State::FinWait2 | State::TimeWait = self.state {
+        // TODO: check if it is triggered in closed state
+        if let State::FinWait2 | State::TimeWait | State::Closed = self.state {
             // we have shutdown our write side and the other side acked, no need to (re)transmit anything
             return Ok(());
         }
@@ -360,6 +453,11 @@ impl Connection {
                 self.tcp.fin = true;
                 self.closed_at = Some(self.send.una.wrapping_add(self.unacked.len() as u32));
             }
+
+            if (resend == 0) {
+                return Ok(());
+            };
+
             self.write(nic, self.send.una, resend as usize)?;
         } else {
             // we should send new data if have new data and space in the window
@@ -377,6 +475,10 @@ impl Connection {
                 self.tcp.fin = true;
                 self.closed_at = Some(self.send.una.wrapping_add(self.unacked.len() as u32));
             }
+
+            if (send == 0) {
+                return Ok(());
+            };
 
             self.write(nic, self.send.nxt, send as usize)?;
         }
@@ -482,51 +584,73 @@ impl Connection {
                         self.send.una
                     };
 
+                    //----------------------------------------------------------------------------------
+                    // old version
+
+                    // let acked_data_end =
+                    //     std::cmp::min(ackn.wrapping_sub(data_start) as usize, self.unacked.len());
+                    // self.unacked.drain(..acked_data_end);
+
+                    // let old = std::mem::replace(&mut self.timers.send_times, BTreeMap::new());
+
+                    // let una = self.send.una;
+                    // let mut srtt = &mut self.timers.srtt;
+                    // self.timers
+                    //     .send_times
+                    //     .extend(old.into_iter().filter_map(|(seq, sent)| {
+                    //         if is_between_wrapped(una, seq, ackn) {
+                    //             *srtt = 0.8 * *srtt + (1.0 - 0.8) * sent.elapsed().as_secs_f64();
+                    //             None
+                    //         } else {
+                    //             Some((seq, sent))
+                    //         }
+                    //     }));
+
+                    //----------------------------------------------------------------------------------
+
                     let acked_data_end =
                         std::cmp::min(ackn.wrapping_sub(data_start) as usize, self.unacked.len());
                     self.unacked.drain(..acked_data_end);
 
-                    let old = std::mem::replace(&mut self.timers.send_times, BTreeMap::new());
+                    self.timers.send_times.retain(|&seq, sent| {
+                        if is_between_wrapped(self.send.una, seq, ackn) {
+                            self.timers.srtt =
+                                0.8 * self.timers.srtt + (1.0 - 0.8) * sent.elapsed().as_secs_f64();
+                            false
+                        } else {
+                            true
+                        }
+                    });
 
-                    let una = self.send.una;
-                    let mut srtt = &mut self.timers.srtt;
-                    self.timers
-                        .send_times
-                        .extend(old.into_iter().filter_map(|(seq, sent)| {
-                            if is_between_wrapped(una, seq, ackn) {
-                                *srtt = 0.8 * *srtt + (1.0 - 0.8) * sent.elapsed().as_secs_f64();
-                                None
-                            } else {
-                                Some((seq, sent))
-                            }
-                        }));
-
-                    // let nacked = self
-                    //     .unacked
-                    //     .drain(..ackn.wrapping_sub(self.send.una) as usize)
-                    //     .count();
-                    // self.timers.send_times.retain(|&seq, sent| {
-                    //     if is_between_wrapped(self.send.una, seq, ackn) {
-                    //         self.timers.srrt =
-                    //             0.8 * self.timers.srrt + (1.0 - 0.8) * sent.elapsed().as_secs_f64();
-                    //         false
-                    //     } else {
-                    //         true
-                    //     }
-                    // });
+                    //----------------------------------------------------------------------------------
                 }
                 self.send.una = ackn;
             }
 
-            // TODO: if unacked empty and witing flush, notify
+            // TODO: if unacked empty and waiting flush, notify
             // TODO: update window
         }
 
+        // receive ack for out FIN
         if let State::FinWait1 = self.state {
             if let Some(closed_at) = self.closed_at {
                 if self.send.una == closed_at.wrapping_add(1) {
                     // our FIN has been ACKed!
                     self.state = State::FinWait2;
+                }
+            }
+        } else if let State::Closing = self.state {
+            if let Some(closed_at) = self.closed_at {
+                if self.send.una == closed_at.wrapping_add(1) {
+                    // our FIN has been ACKed!
+                    self.state = State::TimeWait;
+                }
+            }
+        } else if let State::LastAck = self.state {
+            if let Some(closed_at) = self.closed_at {
+                if self.send.una == closed_at.wrapping_add(1) {
+                    // our FIN has been ACKed!
+                    self.state = State::Closed;
                 }
             }
         }
@@ -565,6 +689,17 @@ impl Connection {
                     self.write(nic, self.send.nxt, 0)?;
                     self.state = State::TimeWait;
                 }
+                State::FinWait1 => {
+                    self.recv.nxt = self.recv.nxt.wrapping_add(1);
+                    self.write(nic, self.send.nxt, 0)?;
+                    self.state = State::Closing;
+                }
+                State::Estab => {
+                    self.recv.nxt = self.recv.nxt.wrapping_add(1);
+                    self.write(nic, self.send.nxt, 0)?;
+                    self.state = State::TimeWait;
+                }
+                // we are not expecting FIN flag in other states
                 _ => unimplemented!(),
             }
         }
@@ -578,7 +713,10 @@ impl Connection {
             State::SynRcvd | State::Estab => {
                 self.state = State::FinWait1;
             }
-            State::FinWait1 | State::FinWait2 => {}
+            State::CloseWait => {
+                self.state = State::LastAck;
+            }
+            State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck => {}
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,

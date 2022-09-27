@@ -13,7 +13,7 @@ mod tcp;
 const SENDQUEUE_SIZE: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
-struct Quad {
+pub struct Quad {
     src: (Ipv4Addr, u16),
     dst: (Ipv4Addr, u16),
 }
@@ -23,6 +23,7 @@ struct Foobar {
     manager: Mutex<ConnectionManager>,
     pending_var: Condvar,
     receive_var: Condvar,
+    send_var: Condvar,
 }
 
 type InterfaceHandle = Arc<Foobar>;
@@ -67,7 +68,6 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
         let n = nix::poll::poll(&mut pfd[..], 10).map_err(|e| e.as_errno().unwrap())?;
         assert_ne!(n, -1);
         if n == 0 {
-            // TODO: timed out -- do something with timers
             let mut cmg = ih.manager.lock().unwrap();
             for connection in cmg.connections.values_mut() {
                 // TODO: dont die on errors
@@ -78,6 +78,7 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
         }
         assert_eq!(n, 1);
 
+        // recv() blocks the thread until the message arrives
         let nbytes = nic.recv(&mut buf[..])?;
 
         // TODO: if self.terminate && Arc::get_strong_refs(ih) == 1; then tear down all connections and return
@@ -129,22 +130,22 @@ fn packet_loop(mut nic: tun_tap::Iface, ih: InterfaceHandle) -> io::Result<()> {
                                     ih.receive_var.notify_all()
                                 }
                                 if a.contains(tcp::Available::WRITE) {
-                                    // TODO: ih.send_var.notify_all()
+                                    ih.send_var.notify_all()
                                 }
                             }
                             Entry::Vacant(e) => {
                                 eprintln!("got packet for unknown quad {:?}", q);
                                 if let Some(pending) = cm.pending.get_mut(&tcp_h.destination_port())
                                 {
-                                    eprintln!("listening, so accepting");
+                                    eprintln!("listening port, so accepting the connection");
                                     if let Some(c) = tcp::Connection::accept(
                                         &mut nic,
                                         ip_h,
                                         tcp_h,
                                         &buf[datai..nbytes],
                                     )? {
-                                        e.insert(c);
-                                        pending.push_back(q);
+                                        e.insert(c); // insert it to connections
+                                        pending.push_back(q); // insert it to pending
                                         drop(cmg);
                                         ih.pending_var.notify_all();
                                     }
@@ -189,11 +190,12 @@ impl Interface {
         match cm.pending.entry(port) {
             Entry::Vacant(v) => {
                 v.insert(VecDeque::new());
+                println!("listening port: {port}")
             }
             Entry::Occupied(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
-                    "port already in bound",
+                    format!("port: {port} already in bound"),
                 ));
             }
         };
@@ -242,6 +244,24 @@ impl TcpListener {
             }
 
             cm = self.h.pending_var.wait(cm).unwrap();
+        }
+    }
+
+    // TODO: fix connect function
+    pub fn connect(&mut self, quad: Quad) -> io::Result<TcpStream> {
+        let mut cm = self.h.manager.lock().unwrap();
+        loop {
+            if let Some(quad) = cm
+                .pending
+                .get_mut(&self.port)
+                .expect("port closed while listener still active")
+                .pop_front()
+            {
+                return Ok(TcpStream {
+                    quad,
+                    h: self.h.clone(),
+                });
+            }
         }
     }
 }
@@ -312,10 +332,17 @@ impl Write for TcpStream {
             ));
         }
 
+        if c.is_snd_closed() {
+            // no more data to write // and no need to block, because there wont be any more
+
+            return Ok(0);
+        }
+
         let nwrite = std::cmp::min(buf.len(), SENDQUEUE_SIZE - c.unacked.len());
         c.unacked.extend(buf[..nwrite].iter());
+        return Ok(nwrite);
 
-        Ok(nwrite)
+        // cm = self.h.send_var.wait(cm).unwrap();
     }
 
     fn flush(&mut self) -> io::Result<()> {

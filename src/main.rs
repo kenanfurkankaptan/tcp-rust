@@ -1,9 +1,12 @@
-use std::io::{Read, Write};
-use std::{io, thread};
+use std::fs::OpenOptions;
+use std::io::prelude::*;
+use std::io::{self, BufReader};
+use std::thread;
 
 fn main() -> io::Result<()> {
     let mut i = tcpRust::Interface::new()?;
     let mut l = i.bind(9000)?;
+
     let jh = thread::spawn(move || {
         while let Ok(mut stream) = l.accept() {
             eprintln!("got connection on 9000!!");
@@ -28,4 +31,12 @@ fn main() -> io::Result<()> {
 
     jh.join().unwrap();
     Ok(())
+}
+
+fn read_user_confirmation() -> io::Result<String> {
+    let file = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    let mut buf_reader = BufReader::new(file);
+    let mut line = String::new();
+    buf_reader.read_line(&mut line)?;
+    Ok(line)
 }
